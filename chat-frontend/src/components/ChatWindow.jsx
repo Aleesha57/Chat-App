@@ -2,120 +2,204 @@ import React, { useState, useEffect, useRef } from 'react';
 import MessageList from './MessageList';
 import MessageInput from './MessageInput';
 import TypingIndicator from './TypingIndicator';
-import { messageAPI } from '../services/api';
+import { messageAPI, authAPI } from '../services/api';
+import wsService from '../services/websocket';
 
 function ChatWindow({ chatRoom, currentUser, onLogout }) {
-  // FIX 1: Initialize messages as an empty array
   const [messages, setMessages] = useState([]);
   const [isTyping, setIsTyping] = useState(false);
+  const [typingUsers, setTypingUsers] = useState(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const pollingInterval = useRef(null);
+  const [connectionStatus, setConnectionStatus] = useState('disconnected');
+  const typingTimeoutRef = useRef(null);
 
-  // Load messages when chat room changes
+  // Debug: Log chatRoom whenever it changes
   useEffect(() => {
-    if (chatRoom && chatRoom.id && chatRoom.id !== 'undefined' && !isNaN(Number(chatRoom.id))) {
+    console.log('ChatWindow chatRoom changed:', chatRoom);
+  }, [chatRoom]);
+
+  // Load initial messages and setup WebSocket
+  useEffect(() => {
+    if (chatRoom && chatRoom.id) {
+      console.log('Loading messages for room:', chatRoom.id);
       loadMessages();
-      // Mark messages as read
-      markRoomAsRead();
-      // Start polling for new messages
-      startPolling();
+      setupWebSocket();
+    } else {
+      console.warn('ChatWindow: No valid chatRoom or chatRoom.id', chatRoom);
     }
 
     return () => {
-      stopPolling();
+      cleanupWebSocket();
     };
   }, [chatRoom]);
 
   const loadMessages = async () => {
-    if (!chatRoom || !chatRoom.id || chatRoom.id === 'undefined' || isNaN(Number(chatRoom.id))) {
-      console.warn('ChatWindow: invalid chatRoom or id; skipping loadMessages', chatRoom);
+    if (!chatRoom || !chatRoom.id) {
+      console.warn('Cannot load messages: invalid chatRoom', chatRoom);
       return;
     }
-    console.debug('ChatWindow: loadMessages() for chatRoom.id=', chatRoom.id);
 
     try {
       setLoading(true);
       setError(null);
       const messagesData = await messageAPI.getByChatRoom(chatRoom.id);
-      
-      // FIX 2: Ensure messagesData is always an array
       setMessages(Array.isArray(messagesData) ? messagesData : []);
       setLoading(false);
     } catch (err) {
       console.error('Error loading messages:', err);
       setError('Failed to load messages');
-      // FIX 3: Set empty array on error to prevent forEach issues
       setMessages([]);
       setLoading(false);
     }
   };
 
-  const markRoomAsRead = async () => {
-    if (!chatRoom) return;
-
-    try {
-      // Comment out until backend is fixed
-      // await messageAPI.markRoomAsRead(chatRoom.id);
-      console.log('Mark as read temporarily disabled');
-    } catch (err) {
-      console.error('Error marking messages as read:', err);
+  const setupWebSocket = () => {
+    if (!chatRoom || !chatRoom.id) {
+      console.warn('Cannot setup WebSocket: invalid chatRoom', chatRoom);
+      return;
     }
-  };
 
-  const startPolling = () => {
-    // Poll for new messages every 3 seconds
-    pollingInterval.current = setInterval(() => {
-      // Guard the current chatRoom id at poll time; don't make requests for invalid ids
-      if (!chatRoom || !chatRoom.id || chatRoom.id === 'undefined' || isNaN(Number(chatRoom.id))) {
-        console.debug('ChatWindow poll skipped due to invalid chatRoom at poll time', chatRoom);
-        return;
+    const token = authAPI.isAuthenticated() ? localStorage.getItem('token') : null;
+    
+    if (!token) {
+      console.error('No auth token available');
+      return;
+    }
+
+    // Connect to WebSocket
+    console.log('Connecting WebSocket for room:', chatRoom.id);
+    wsService.connect(chatRoom.id, token);
+
+    // Handle incoming messages
+    const unsubscribeMessage = wsService.onMessage((message) => {
+      if (message.type === 'read_receipt') {
+        // Update message read status
+        setMessages(prev => prev.map(msg => 
+          msg.id === message.message_id 
+            ? { ...msg, is_read: true }
+            : msg
+        ));
+      } else {
+        // New message received
+        setMessages(prev => {
+          // Avoid duplicates
+          if (prev.some(m => m.id === message.id)) {
+            return prev;
+          }
+          return [...prev, message];
+        });
+        
+        // Send read receipt if message is from another user
+        if (message.sender.id !== currentUser?.id) {
+          wsService.sendReadReceipt(message.id);
+        }
       }
+    });
 
-      console.debug('ChatWindow: poll triggered, chatRoom=', chatRoom);
-      loadMessages();
-    }, 3000);
+    // Handle typing indicators
+    const unsubscribeTyping = wsService.onTyping((data) => {
+      if (data.user_id !== currentUser?.id) {
+        setTypingUsers(prev => {
+          const newSet = new Set(prev);
+          if (data.is_typing) {
+            newSet.add(data.username);
+          } else {
+            newSet.delete(data.username);
+          }
+          return newSet;
+        });
+      }
+    });
+
+    // Handle connection status
+    const unsubscribeConnection = wsService.onConnectionChange((status) => {
+      console.log('WebSocket connection status:', status);
+      setConnectionStatus(status.status);
+      if (status.status === 'error') {
+        setError('Connection error. Retrying...');
+      } else if (status.status === 'connected') {
+        setError(null);
+      }
+    });
+
+    // Cleanup function
+    return () => {
+      unsubscribeMessage();
+      unsubscribeTyping();
+      unsubscribeConnection();
+    };
   };
 
-  const stopPolling = () => {
-    if (pollingInterval.current) {
-      clearInterval(pollingInterval.current);
-      pollingInterval.current = null;
-    }
+  const cleanupWebSocket = () => {
+    console.log('Cleaning up WebSocket');
+    wsService.disconnect();
+    setTypingUsers(new Set());
+    setConnectionStatus('disconnected');
   };
 
   const handleSendMessage = async (text) => {
-    if (!chatRoom || !text.trim()) return;
+    if (!text.trim()) {
+      console.warn('Cannot send empty message');
+      return;
+    }
+
+    if (!chatRoom || !chatRoom.id) {
+      console.error('Cannot send message: chatRoom or chatRoom.id is missing', chatRoom);
+      setError('Cannot send message: No chat room selected');
+      return;
+    }
+
+    console.log('Sending message to room:', chatRoom.id, 'Text:', text);
 
     try {
-      const newMessage = await messageAPI.send(chatRoom.id, text);
-      // FIX 5: Use functional update to ensure latest state
-      setMessages(prevMessages => [...prevMessages, newMessage]);
-      
-      // Scroll to bottom
-      setTimeout(() => {
-        const messageList = document.querySelector('.message-list');
-        if (messageList) {
-          messageList.scrollTop = messageList.scrollHeight;
+      // Try WebSocket first
+      if (wsService.isConnected()) {
+        console.log('Sending via WebSocket');
+        const success = wsService.sendMessage(text);
+        if (success) {
+          // Message will be received via WebSocket callback
+          return;
         }
-      }, 100);
+        console.warn('WebSocket send failed, falling back to HTTP');
+      } else {
+        console.log('WebSocket not connected, using HTTP');
+      }
+
+      // Fallback to HTTP if WebSocket fails
+      console.log('Sending via HTTP with chatRoomId:', chatRoom.id);
+      const newMessage = await messageAPI.send(chatRoom.id, text);
+      setMessages(prev => [...prev, newMessage]);
     } catch (err) {
       console.error('Error sending message:', err);
-      setError('Failed to send message');
+      setError('Failed to send message: ' + err.message);
     }
   };
 
   const handleTyping = () => {
-    // In production, send typing indicator via WebSocket
-    console.log('User is typing...');
+    if (!wsService.isConnected()) {
+      return;
+    }
+
+    // Send typing indicator
+    wsService.sendTyping(true);
+
+    // Clear previous timeout
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+    }
+
+    // Stop typing after 3 seconds of inactivity
+    typingTimeoutRef.current = setTimeout(() => {
+      wsService.sendTyping(false);
+    }, 3000);
   };
 
-  // Get other user info for header (for private chats)
   const getOtherUser = () => {
     if (!chatRoom || chatRoom.is_group) return null;
-    // Ensure users is an array-like structure (backend might send object)
-    const users = Array.isArray(chatRoom.users) ? chatRoom.users : (chatRoom.users ? Object.values(chatRoom.users) : []);
-    if (users.length === 0) return null;
+    const users = Array.isArray(chatRoom.users) 
+      ? chatRoom.users 
+      : (chatRoom.users ? Object.values(chatRoom.users) : []);
     return users.find(user => user?.id !== currentUser?.id) || null;
   };
 
@@ -128,7 +212,19 @@ function ChatWindow({ chatRoom, currentUser, onLogout }) {
     return otherUser ? (otherUser.username || otherUser.name || 'Chat') : 'Chat';
   };
 
-  // Show empty state when no chat room is selected
+  const getConnectionStatusIcon = () => {
+    switch (connectionStatus) {
+      case 'connected':
+        return '🟢';
+      case 'disconnected':
+        return '🔴';
+      case 'error':
+        return '🟡';
+      default:
+        return '⚪';
+    }
+  };
+
   if (!chatRoom) {
     return (
       <div className="chat-window">
@@ -141,6 +237,19 @@ function ChatWindow({ chatRoom, currentUser, onLogout }) {
     );
   }
 
+  // Additional safety check
+  if (!chatRoom.id) {
+    return (
+      <div className="chat-window">
+        <div className="no-chat-selected">
+          <div className="no-chat-icon">⚠️</div>
+          <h2>Invalid Chat Room</h2>
+          <p>Please select a valid chat room</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="chat-window">
       <div className="chat-header">
@@ -148,37 +257,47 @@ function ChatWindow({ chatRoom, currentUser, onLogout }) {
           {(getChatTitle() || '').charAt(0).toUpperCase()}
         </div>
         <div className="user-info">
-          <div className="user-name">{getChatTitle()}</div>
+          <div className="user-name">
+            {getChatTitle()}
+            <small style={{ marginLeft: '8px', fontSize: '11px', opacity: 0.7 }}>
+              (ID: {chatRoom.id})
+            </small>
+          </div>
           <div className="user-status">
-                {chatRoom.is_group 
-              ? `${(Array.isArray(chatRoom.users) ? chatRoom.users.length : (chatRoom.users ? Object.keys(chatRoom.users).length : 0))} members` 
+            {chatRoom.is_group 
+              ? `${(Array.isArray(chatRoom.users) ? chatRoom.users.length : 0)} members` 
               : 'Online'}
+            <span style={{ marginLeft: '8px' }} title={`WebSocket: ${connectionStatus}`}>
+              {getConnectionStatusIcon()}
+            </span>
           </div>
         </div>
-            {/* Logout button to return to login screen; App controls auth state */}
-            <div className="chat-actions">
-              <div className="current-user">{currentUser?.username}</div>
-              <button
-                type="button"
-                className="logout-button"
-                onClick={() => onLogout?.()}
-                title="Logout"
-              >
-                Logout
-              </button>
-            </div>
+        <div className="chat-actions">
+          <div className="current-user">{currentUser?.username}</div>
+          <button
+            type="button"
+            className="logout-button"
+            onClick={() => onLogout?.()}
+            title="Logout"
+          >
+            Logout
+          </button>
+        </div>
       </div>
       
       {loading && <div className="loading-messages">Loading messages...</div>}
       {error && <div className="error-messages">{error}</div>}
       
-      {/* FIX 6: Add error boundary protection */}
       <MessageList 
         messages={messages} 
         currentUserId={currentUser?.id}
       />
       
-      {isTyping && <TypingIndicator userName="User" />}
+      {typingUsers.size > 0 && (
+        <TypingIndicator 
+          userName={Array.from(typingUsers).join(', ')} 
+        />
+      )}
       
       <MessageInput 
         onSendMessage={handleSendMessage}

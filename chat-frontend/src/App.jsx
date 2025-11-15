@@ -16,11 +16,9 @@ function App() {
 
   // Check authentication on mount
   useEffect(() => {
-    // If a token exists, validate it by calling /api/users/me/ before showing the app
     if (authAPI.isAuthenticated()) {
       (async () => {
         try {
-          // Attempt to fetch current user using token. If this fails, token is invalid.
           await userAPI.getMe();
           setIsAuthenticated(true);
           await initializeApp();
@@ -36,7 +34,6 @@ function App() {
     }
   }, []);
 
-  // Load initial data when authenticated
   const initializeApp = async () => {
     try {
       setLoading(true);
@@ -44,19 +41,25 @@ function App() {
       
       // Load all users
       const usersData = await userAPI.getAll();
+      console.log('Loaded users:', usersData);
       setUsers(usersData);
 
       // Load chat rooms for current user
       const chatRoomsData = await chatRoomAPI.getAll();
-      setChatRooms(chatRoomsData);
+      console.log('Loaded chat rooms:', chatRoomsData);
+      // Ensure it's an array (handle pagination)
+      const roomsArray = Array.isArray(chatRoomsData) 
+        ? chatRoomsData 
+        : (chatRoomsData?.results || []);
+      console.log('Chat rooms array:', roomsArray);
+      setChatRooms(roomsArray);
 
-      // Get current user info (first user for demo - you should implement a proper endpoint)
-      // Use server-provided /api/users/me/ to fetch the authenticated user's data
+      // Get current user info
       try {
         const me = await userAPI.getMe();
+        console.log('Current user:', me);
         setCurrentUser(me);
       } catch (err) {
-        // Fallback to first user in the list if `me` endpoint fails
         if (usersData.length > 0) {
           setCurrentUser(usersData[0]);
         }
@@ -68,7 +71,6 @@ function App() {
       setError(err.message);
       setLoading(false);
       
-      // If unauthorized, logout
       if (err.response?.status === 401) {
         handleLogout();
       }
@@ -92,27 +94,51 @@ function App() {
   const handleUserSelect = async (user) => {
     try {
       setError(null);
+      console.log('User selected:', user);
+      
       // Get or create private chat room with this user
       const chatRoom = await chatRoomAPI.getOrCreatePrivate(user.id);
-      setSelectedChatRoom(chatRoom);
-
-      // Update chat rooms list if new room was created
-      const exists = chatRooms.find(room => room.id === chatRoom.id);
-      if (!exists) {
-        setChatRooms([chatRoom, ...chatRooms]);
-      } else {
-        // Update existing room data
-        setChatRooms(chatRooms.map(room => 
-          room.id === chatRoom.id ? chatRoom : room
-        ));
+      console.log('Chat room retrieved/created:', chatRoom);
+      
+      // CRITICAL: Verify chatRoom has an id
+      if (!chatRoom || !chatRoom.id) {
+        console.error('Invalid chat room received:', chatRoom);
+        setError('Failed to open chat: Invalid room data');
+        return;
       }
+
+      setSelectedChatRoom(chatRoom);
+      console.log('Selected chat room set:', chatRoom);
+
+      // Update chat rooms list - ensure chatRooms is an array
+      setChatRooms(prevRooms => {
+        const roomsArray = Array.isArray(prevRooms) ? prevRooms : [];
+        const exists = roomsArray.find(room => room.id === chatRoom.id);
+        
+        if (!exists) {
+          return [chatRoom, ...roomsArray];
+        } else {
+          return roomsArray.map(room => 
+            room.id === chatRoom.id ? chatRoom : room
+          );
+        }
+      });
     } catch (err) {
       console.error('Error selecting user:', err);
-      setError('Failed to open chat');
+      setError('Failed to open chat: ' + err.message);
     }
   };
 
   const handleChatRoomSelect = async (chatRoom) => {
+    console.log('Chat room selected:', chatRoom);
+    
+    // Verify chatRoom has an id
+    if (!chatRoom || !chatRoom.id) {
+      console.error('Invalid chat room selected:', chatRoom);
+      setError('Invalid chat room selected');
+      return;
+    }
+    
     setSelectedChatRoom(chatRoom);
     setError(null);
   };

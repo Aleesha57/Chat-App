@@ -2,8 +2,6 @@
 
 const API_BASE_URL = 'http://localhost:8000';
 
-// Note: Backend uses endpoints registered under names 'chatrooms' not 'chat_rooms'
-
 // Helper function to get auth token
 const getAuthToken = () => {
   return localStorage.getItem('token') || sessionStorage.getItem('token');
@@ -28,13 +26,11 @@ const authenticatedFetch = async (url, options = {}) => {
   });
   
   if (!response.ok) {
-    // Try to parse JSON error body; if that fails, fallback to text (useful for Django HTML tracebacks)
     let errorMessage = `HTTP ${response.status}`;
     try {
       const errorData = await response.json();
       errorMessage = errorData.error || errorData.detail || JSON.stringify(errorData) || errorMessage;
     } catch (jsonErr) {
-      // Not JSON — try plain text (may contain Django traceback HTML)
       try {
         const text = await response.text();
         errorMessage = text || errorMessage;
@@ -43,9 +39,7 @@ const authenticatedFetch = async (url, options = {}) => {
       }
     }
 
-    // Log full response to console for easier debugging
     console.error('API error response:', { url, status: response.status, message: errorMessage });
-
     throw new Error(errorMessage);
   }
 
@@ -58,7 +52,6 @@ export const messageAPI = {
   getByChatRoom: async (roomId) => {
     try {
       if (roomId == null || roomId === 'undefined' || isNaN(Number(roomId))) {
-        // Don't call backend when chat room id is invalid — return empty array
         console.warn(`messageAPI.getByChatRoom called with invalid id: ${roomId}`);
         return [];
       }
@@ -75,6 +68,8 @@ export const messageAPI = {
   // Send a new message
   send: async (chatRoomId, text) => {
     try {
+      console.log('Sending message:', { chatRoomId, text }); // Debug log
+      
       return await authenticatedFetch(
         `${API_BASE_URL}/api/messages/`,
         {
@@ -103,13 +98,12 @@ export const messageAPI = {
       );
     } catch (error) {
       console.error('Error marking room as read:', error);
-      // Don't throw - this is a non-critical operation
       return null;
     }
   },
 };
 
-// Chat Room API (if needed)
+// Chat Room API
 export const chatRoomAPI = {
   getAll: async () => {
     try {
@@ -156,6 +150,10 @@ export const userAPI = {
   getAll: async () => {
     try {
       const data = await authenticatedFetch(`${API_BASE_URL}/api/users/`);
+      // Handle paginated response
+      if (data && data.results) {
+        return Array.isArray(data.results) ? data.results : [];
+      }
       return Array.isArray(data) ? data : [];
     } catch (error) {
       console.error('Error fetching users:', error);
@@ -189,7 +187,6 @@ export const authAPI = {
         throw new Error(err.detail || `HTTP ${res.status}`);
       }
       const data = await res.json();
-      // TokenObtainPairView returns `access` and `refresh`
       if (data.access) {
         localStorage.setItem('token', data.access);
         if (data.refresh) {

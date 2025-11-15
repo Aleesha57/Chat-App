@@ -103,7 +103,7 @@ class MessageViewSet(viewsets.ModelViewSet):
     """
     permission_classes = [IsAuthenticated]
     serializer_class = MessageSerializer
-    pagination_class = None  # FIX: Disable pagination for real-time chat
+    pagination_class = None  # Disable pagination for real-time chat
     
     def get_queryset(self):
         """Filter messages by chat room"""
@@ -112,12 +112,11 @@ class MessageViewSet(viewsets.ModelViewSet):
         # Filter by chat room if provided
         chat_room_id = self.request.query_params.get('chat_room')
         if chat_room_id:
-            # Validate chat_room_id is an integer to avoid server errors from invalid input
+            # Validate chat_room_id is an integer to avoid server errors
             try:
                 chat_room_id = int(chat_room_id)
             except (TypeError, ValueError):
                 from rest_framework.exceptions import ValidationError
-
                 raise ValidationError({'chat_room': 'Invalid chat_room id'})
 
             queryset = queryset.filter(chat_room_id=chat_room_id)
@@ -131,20 +130,23 @@ class MessageViewSet(viewsets.ModelViewSet):
     
     def create(self, request, *args, **kwargs):
         """Send a new message"""
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        
-        # Set sender to current user
-        serializer.validated_data['sender_id'] = request.user.id
-        
-        # Verify user is in the chat room
+        # Get chat room ID from request
         chat_room_id = request.data.get('chat_room')
+        text = request.data.get('text')
+        
         if not chat_room_id:
             return Response(
                 {'error': 'chat_room is required'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        if not text or not text.strip():
+            return Response(
+                {'error': 'text is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verify chat room exists and user is a member
         try:
             chat_room = ChatRoom.objects.get(id=chat_room_id)
             if request.user not in chat_room.users.all():
@@ -158,12 +160,16 @@ class MessageViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        message = serializer.save()
-        
-        return Response(
-            MessageSerializer(message).data, 
-            status=status.HTTP_201_CREATED
+        # Create the message with the current user as sender
+        message = Message.objects.create(
+            chat_room=chat_room,
+            sender=request.user,
+            text=text.strip()
         )
+        
+        # Serialize and return
+        serializer = MessageSerializer(message)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
     
     @action(detail=True, methods=['post'])
     def mark_read(self, request, pk=None):
@@ -187,7 +193,7 @@ class MessageViewSet(viewsets.ModelViewSet):
         try:
             chat_room = ChatRoom.objects.get(id=chat_room_id)
             
-            # FIX: Check if user is member of chat room
+            # Check if user is member of chat room
             if request.user not in chat_room.users.all():
                 return Response(
                     {'error': 'You are not a member of this chat room'}, 
@@ -227,10 +233,12 @@ class UserViewSet(viewsets.ReadOnlyModelViewSet):
     Endpoints:
     - GET /api/users/ - List all users
     - GET /api/users/{id}/ - Get specific user
+    - GET /api/users/me/ - Get current user
     """
     queryset = User.objects.all()
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = None  # Disable pagination for users list
 
     @action(detail=False, methods=['get'])
     def me(self, request):
